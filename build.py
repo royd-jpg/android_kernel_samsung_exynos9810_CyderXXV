@@ -194,7 +194,7 @@ def apply_ksun() -> None:
     #  • Applies the kernel hook patches
     #  • Works for non-GKI kernels >= 4.4
     setup_script = WORK_DIR / "ksun_setup.sh"
-    download(KSUN_SETUP, setup_script)
+    run(["curl", "-LSs", "-o", str(setup_script), KSUN_SETUP])
 
     run_shell(f"bash {setup_script}", cwd=KERNEL_DIR)
     setup_script.unlink(missing_ok=True)
@@ -215,7 +215,7 @@ def apply_susfs() -> None:
         return
 
     patch_file = WORK_DIR / "susfs.patch"
-    download(SUSFS_PATCH, patch_file)
+    run(["curl", "-LSs", "-o", str(patch_file), SUSFS_PATCH])
 
     # Apply the patch inside the KernelSU-Next directory
     try:
