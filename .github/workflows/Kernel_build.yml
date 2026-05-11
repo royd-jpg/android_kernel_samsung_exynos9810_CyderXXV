@@ -89,7 +89,12 @@ jobs:
           restore-keys: |
             kernel-
 
-      # ── 5. Run build script ───────────────────────────────────────────────
+      # ── 5. Apply build fixes ──────────────────────────────────────────────
+      - name: Apply build fixes
+        working-directory: builder
+        run: python3 fix_build.py --kernel workspace/kernel --build-py build.py
+
+      # ── 6. Run build script ───────────────────────────────────────────────
       - name: Build kernel (${{ matrix.device }})
         working-directory: builder
         env:
@@ -101,7 +106,7 @@ jobs:
           fi
           python3 build.py --device "$DEVICE" $CLEAN_FLAG
 
-      # ── 6. Verify artifact ────────────────────────────────────────────────
+      # ── 7. Verify artifact ────────────────────────────────────────────────
       - name: Verify artifact
         working-directory: builder
         run: |
@@ -115,14 +120,14 @@ jobs:
           ls -lh dist/
           cat dist/build_meta.json
 
-      # ── 7. Upload artifact ────────────────────────────────────────────────
+      # ── 8. Upload artifact ────────────────────────────────────────────────
       - name: Upload flashable zip
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ZIP_NAME }}
           path: builder/dist/${{ env.ZIP_NAME }}
           retention-days: 30
-          compression-level: 0  # zip is already compressed
+          compression-level: 0
 
       - name: Upload build metadata
         uses: actions/upload-artifact@v4
@@ -131,7 +136,7 @@ jobs:
           path: builder/dist/build_meta.json
           retention-days: 30
 
-      # ── 8. Create GitHub Release (manual dispatch only) ───────────────────
+      # ── 9. Create GitHub Release (manual dispatch only) ───────────────────
       - name: Create GitHub Release
         if: >
           github.event_name == 'workflow_dispatch' &&
@@ -156,20 +161,20 @@ jobs:
             3. Reboot system
 
             #### Method B — ADB Sideload
-            ```bash
-            adb sideload <zip>
-            ```
-
-            #### Method C — Heimdall (Download Mode)
-            ```bash
-            python3 flash.py --method heimdall --zip <zip>
-            ```
-
-            ### Post-Flash
-            - Install the **KernelSU-Next Manager** APK
-            - Flash the **susfs4ksu** module via KSU Manager
-
-            > ⚠️ Backup your data. Rooting voids warranty.
+              ```bash
+                          adb sideload <zip>
+              ```
+              
+                          #### Method C — Heimdall (Download Mode)
+              ```bash
+                          python3 flash.py --method heimdall --zip <zip>
+              ```
+              
+                          ### Post-Flash
+                          - Install the **KernelSU-Next Manager** APK
+                          - Flash the **susfs4ksu** module via KSU Manager
+              
+                          > ⚠️ Backup your data. Rooting voids warranty.
           files: builder/dist/${{ env.ZIP_NAME }}
           draft: false
           prerelease: true
