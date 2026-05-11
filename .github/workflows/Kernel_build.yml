@@ -76,9 +76,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: builder/workspace/toolchain
-          key: toolchain-clang18-gcc49-v3
+          key: toolchain-protonclang-gcc49-lineage190-v1
           restore-keys: |
-            toolchain-clang18-gcc49-
+            toolchain-protonclang-gcc49-
 
       # ── 4. Cache kernel source ────────────────────────────────────────────
       - name: Cache kernel source
