@@ -21,8 +21,6 @@ import platform
 import shutil
 import subprocess
 import sys
-import tarfile
-import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -65,19 +63,22 @@ DEVICES = {
     },
 }
 
-# ─── Toolchain URLs ────────────────────────────────────────────────────────────
-# Using LineageOS prebuilt toolchains (proven to work with this kernel tree)
-TOOLCHAIN_URLS = {
+# ─── Toolchain sources ─────────────────────────────────────────────────────────
+# GCC: shallow git clone from LineageOS (tarball branches are unreliable)
+# Clang: shallow git clone from AOSP prebuilts (specific tag that works on 4.9)
+TOOLCHAIN_GIT = {
     "clang": {
-        "url":  "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r416183b.tar.gz",
-        # Fallback: ZyC clang (smaller, faster download for CI)
-        "fallback": "https://github.com/ZyCromerZ/Clang/releases/download/18.0.0git-20240101-release/Clang-18.0.0git-20240101.tar.gz",
+        "repo":   "https://github.com/kdrag0n/proton-clang.git",
+        # Proton Clang 13 — well-tested on Samsung Exynos 4.9 trees, small clone
+        "branch": "master",
     },
     "gcc64": {
-        "url": "https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9/archive/refs/heads/lineage-19.1.tar.gz",
+        "repo":   "https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git",
+        "branch": "lineage-19.0",
     },
     "gcc32": {
-        "url": "https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9/archive/refs/heads/lineage-19.1.tar.gz",
+        "repo":   "https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git",
+        "branch": "lineage-19.0",
     },
 }
 
@@ -107,36 +108,6 @@ def run_shell(script: str, cwd: Path | None = None,
                    executable="/bin/bash")
 
 
-def download(url: str, dest: Path) -> None:
-    """Download a file with a simple progress indicator."""
-    log.info("Downloading %s → %s", url, dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-
-    def _reporthook(count, block_size, total_size):
-        if total_size > 0:
-            pct = count * block_size * 100 // total_size
-            print(f"\r  {pct:3d}%", end="", flush=True)
-
-    urllib.request.urlretrieve(url, dest, reporthook=_reporthook)
-    print()  # newline after progress
-
-
-def extract_tar(archive: Path, dest: Path, strip: int = 0) -> None:
-    """Extract a tar archive, optionally stripping leading path components."""
-    dest.mkdir(parents=True, exist_ok=True)
-    log.info("Extracting %s → %s", archive.name, dest)
-    with tarfile.open(archive) as tf:
-        if strip == 0:
-            tf.extractall(dest)
-        else:
-            members = tf.getmembers()
-            for m in members:
-                parts = Path(m.name).parts
-                if len(parts) > strip:
-                    m.name = str(Path(*parts[strip:]))
-                    tf.extract(m, dest)
-
-
 def git_clone(url: str, dest: Path, branch: str | None = None,
               depth: int = 1) -> None:
     cmd = ["git", "clone", "--depth", str(depth)]
@@ -153,50 +124,31 @@ def nproc() -> int:
 # ─── Step 1: Toolchains ────────────────────────────────────────────────────────
 
 def setup_clang() -> Path:
-    """Download and extract Clang. Returns bin/ directory."""
+    """Clone Proton Clang (well-tested on Samsung 4.9 trees). Returns bin/."""
     bin_dir = CLANG_DIR / "bin"
     if (bin_dir / "clang").exists():
-        log.info("Clang already present, skipping download.")
+        log.info("Clang already present, skipping clone.")
         return bin_dir
 
-    # Try ZyC clang first (smaller tar, reliable for this kernel era)
-    archive = TOOLCHAIN / "clang.tar.gz"
-    try:
-        download(TOOLCHAIN_URLS["clang"]["fallback"], archive)
-        extract_tar(archive, CLANG_DIR, strip=0)
-    except Exception as e:
-        log.warning("ZyC clang download failed (%s), trying AOSP clang…", e)
-        archive.unlink(missing_ok=True)
-        download(TOOLCHAIN_URLS["clang"]["url"], archive)
-        extract_tar(archive, CLANG_DIR, strip=0)
-    finally:
-        archive.unlink(missing_ok=True)
-
-    # Some tarballs wrap inside a directory — unwrap if needed
-    subdirs = [d for d in CLANG_DIR.iterdir() if d.is_dir()]
-    if subdirs and not (CLANG_DIR / "bin").exists():
-        for item in subdirs[0].iterdir():
-            shutil.move(str(item), CLANG_DIR)
-        subdirs[0].rmdir()
-
+    cfg = TOOLCHAIN_GIT["clang"]
+    log.info("Cloning Clang — this is ~500 MB, please wait…")
+    git_clone(cfg["repo"], CLANG_DIR, branch=cfg["branch"], depth=1)
     return bin_dir
 
 
 def setup_gcc(which: str) -> Path:
-    """Download and extract GCC (gcc64 or gcc32). Returns bin/ directory."""
+    """Clone LineageOS prebuilt GCC. Returns bin/ directory."""
     gcc_dir = GCC64_DIR if which == "gcc64" else GCC32_DIR
     prefix  = "aarch64-linux-android-" if which == "gcc64" else "arm-linux-androideabi-"
     bin_dir = gcc_dir / "bin"
 
-    if any(bin_dir.glob(f"{prefix}gcc")):
-        log.info("GCC (%s) already present, skipping.", which)
+    if list(bin_dir.glob(f"{prefix}gcc")):
+        log.info("GCC (%s) already present, skipping clone.", which)
         return bin_dir
 
-    url     = TOOLCHAIN_URLS[which]["url"]
-    archive = TOOLCHAIN / f"{which}.tar.gz"
-    download(url, archive)
-    extract_tar(archive, gcc_dir, strip=1)
-    archive.unlink(missing_ok=True)
+    cfg = TOOLCHAIN_GIT[which]
+    log.info("Cloning %s GCC…", which)
+    git_clone(cfg["repo"], gcc_dir, branch=cfg["branch"], depth=1)
     return bin_dir
 
 
