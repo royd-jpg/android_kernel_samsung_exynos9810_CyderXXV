@@ -1,0 +1,189 @@
+name: Build Exynos9810 Kernel — KSU-Next + SUSFS
+
+on:
+  # Run on every push to main/lineage_ksu
+  push:
+    branches: [main, lineage_ksu, master]
+    paths-ignore:
+      - "**.md"
+      - ".gitignore"
+
+  # Run on PRs targeting those branches
+  pull_request:
+    branches: [main, lineage_ksu, master]
+
+  # Allow manual trigger with device selection
+  workflow_dispatch:
+    inputs:
+      device:
+        description: "Device codename"
+        required: true
+        default: starlte
+        type: choice
+        options:
+          - starlte
+          - star2lte
+          - crownlte
+      clean_build:
+        description: "Clean out/ before building"
+        required: false
+        default: "false"
+        type: boolean
+      release:
+        description: "Create a GitHub Release with the artifact"
+        required: false
+        default: "false"
+        type: boolean
+
+# Allow only one concurrent run per branch; cancel older runs
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.device || 'starlte' }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build (${{ inputs.device || 'starlte' }})
+    runs-on: ubuntu-22.04
+
+    # Build a matrix across all three devices on push to main/lineage_ksu;
+    # single device on manual dispatch
+    strategy:
+      fail-fast: false
+      matrix:
+        device: ${{ github.event_name == 'workflow_dispatch' && fromJson(format('["{0}"]', inputs.device)) || fromJson('["starlte","star2lte","crownlte"]') }}
+
+    steps:
+      # ── 1. Checkout THIS repo (contains build scripts) ────────────────────
+      - name: Checkout build scripts
+        uses: actions/checkout@v4
+        with:
+          path: builder
+
+      # ── 2. System dependencies ────────────────────────────────────────────
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ca-certificates curl flex \
+            git libssl-dev libelf-dev lz4 make ninja-build \
+            patch python3 python3-pip unzip wget zip \
+            llvm lld clang \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
+
+      # ── 3. Cache toolchains ───────────────────────────────────────────────
+      - name: Cache toolchains
+        uses: actions/cache@v4
+        with:
+          path: builder/workspace/toolchain
+          key: toolchain-clang18-gcc49-v3
+          restore-keys: |
+            toolchain-clang18-gcc49-
+
+      # ── 4. Cache kernel source ────────────────────────────────────────────
+      - name: Cache kernel source
+        uses: actions/cache@v4
+        with:
+          path: builder/workspace/kernel
+          key: kernel-${{ github.sha }}
+          restore-keys: |
+            kernel-
+
+      # ── 5. Run build script ───────────────────────────────────────────────
+      - name: Build kernel (${{ matrix.device }})
+        working-directory: builder
+        env:
+          DEVICE: ${{ matrix.device }}
+        run: |
+          CLEAN_FLAG=""
+          if [ "${{ inputs.clean_build }}" = "true" ]; then
+            CLEAN_FLAG="--clean"
+          fi
+          python3 build.py --device "$DEVICE" $CLEAN_FLAG
+
+      # ── 6. Verify artifact ────────────────────────────────────────────────
+      - name: Verify artifact
+        working-directory: builder
+        run: |
+          ZIP=$(ls dist/Exynos9810-${{ matrix.device }}-*.zip 2>/dev/null | tail -1)
+          if [ -z "$ZIP" ]; then
+            echo "::error::No flashable zip found in dist/"
+            exit 1
+          fi
+          echo "ZIP=$ZIP" >> $GITHUB_ENV
+          echo "ZIP_NAME=$(basename $ZIP)" >> $GITHUB_ENV
+          ls -lh dist/
+          cat dist/build_meta.json
+
+      # ── 7. Upload artifact ────────────────────────────────────────────────
+      - name: Upload flashable zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: builder/dist/${{ env.ZIP_NAME }}
+          retention-days: 30
+          compression-level: 0  # zip is already compressed
+
+      - name: Upload build metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: build_meta-${{ matrix.device }}
+          path: builder/dist/build_meta.json
+          retention-days: 30
+
+      # ── 8. Create GitHub Release (manual dispatch only) ───────────────────
+      - name: Create GitHub Release
+        if: >
+          github.event_name == 'workflow_dispatch' &&
+          inputs.release == 'true' &&
+          github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "ksu-susfs-${{ matrix.device }}-${{ github.run_number }}"
+          name: "Exynos9810 ${{ matrix.device }} KSU-Next+SUSFS #${{ github.run_number }}"
+          body: |
+            ## Exynos9810 KernelSU-Next + SUSFS Kernel
+
+            **Device**: ${{ matrix.device }}
+            **Source**: ${{ github.server_url }}/${{ github.repository }}@${{ github.sha }}
+            **KernelSU**: KernelSU-Next (rifsxd)
+            **SUSFS**: v1.5.7+
+
+            ### Flash Instructions
+            #### Method A — TWRP (recommended)
+            1. Boot into TWRP recovery
+            2. Flash the zip via **Install** → select zip → **Swipe to Flash**
+            3. Reboot system
+
+            #### Method B — ADB Sideload
+            ```bash
+            adb sideload <zip>
+            ```
+
+            #### Method C — Heimdall (Download Mode)
+            ```bash
+            python3 flash.py --method heimdall --zip <zip>
+            ```
+
+            ### Post-Flash
+            - Install the **KernelSU-Next Manager** APK
+            - Flash the **susfs4ksu** module via KSU Manager
+
+            > ⚠️ Backup your data. Rooting voids warranty.
+          files: builder/dist/${{ env.ZIP_NAME }}
+          draft: false
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Notify on failure ─────────────────────────────────────────────────────
+  notify-failure:
+    name: Notify on failure
+    runs-on: ubuntu-22.04
+    needs: build
+    if: failure()
+    steps:
+      - name: Print failure summary
+        run: |
+          echo "::error::Kernel build failed for one or more devices."
+          echo "Check the individual job logs for details."
