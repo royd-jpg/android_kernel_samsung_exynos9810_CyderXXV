@@ -92,7 +92,120 @@ jobs:
       # ── 5. Apply build fixes ──────────────────────────────────────────────
       - name: Apply build fixes
         working-directory: builder
-        run: python3 fix_build.py --kernel workspace/kernel --build-py build.py
+        run: |
+          python3 - <<'PYEOF'
+          import re, shutil, sys, urllib.request
+          from pathlib import Path
+
+          GREEN="\033[92m"; YELLOW="\033[93m"; RED="\033[91m"; NC="\033[0m"
+          def info(m): print(f"{GREEN}[INFO]{NC}  {m}")
+          def warn(m): print(f"{YELLOW}[WARN]{NC}  {m}")
+          def err(m):  print(f"{RED}[ERR]{NC}   {m}", file=sys.stderr)
+
+          build_py = Path("build.py")
+          if not build_py.exists():
+              err("build.py not found"); sys.exit(1)
+
+          shutil.copy2(build_py, "build.py.bak")
+          info("Backed up build.py")
+          src = build_py.read_text()
+
+          # ── 1. Inject fs/Makefile ccflags fix (runs after kernel clone) ──
+          GUARD1 = "# KSU_CCFLAG_FIX"
+          ANCHOR = '("✅  KernelSU-Next applied.")'
+          CODE1 = '''
+          # KSU_CCFLAG_FIX
+          _mk = KERNEL_DIR / "fs" / "Makefile"
+          _flag = "ccflags-y += -I$(srctree)/drivers/kernelsu\\n"
+          if _mk.exists():
+              _t = _mk.read_text()
+              if _flag.strip() not in _t:
+                  _ls = _t.splitlines(keepends=True)
+                  _i = next((i+1 for i,l in enumerate(_ls) if l.strip().startswith("ccflags-y")), 0)
+                  _ls.insert(_i, _flag)
+                  _mk.write_text("".join(_ls))
+                  log.info("ksu_hook.h: added ccflags to fs/Makefile")
+              else:
+                  log.info("ksu_hook.h: ccflags already present")
+          else:
+              log.warning("ksu_hook.h: fs/Makefile not found, skipping")
+          '''
+          if GUARD1 in src:
+              warn("Makefile fix already present — skipping")
+          elif ANCHOR in src:
+              lines = src.splitlines(keepends=True)
+              idx = next(i for i,l in enumerate(lines) if ANCHOR in l)
+              lines.insert(idx+1, CODE1)
+              src = "".join(lines)
+              info("Patch 1: fs/Makefile ccflag fix injected into build.py")
+          else:
+              warn("Could not find KernelSU-Next anchor — Makefile fix skipped")
+
+          # ── 2. Fix broken SUSFS URL ───────────────────────────────────────
+          GUARD2 = "# SUSFS_URL_OK"
+          CANDIDATES = [
+              "https://raw.githubusercontent.com/simonpunk/susfs4ksu/main/kernel_patches/50_add_susfs_in_kernel-1.5.7.patch",
+              "https://raw.githubusercontent.com/simonpunk/susfs4ksu/main/kernel_patches/50_add_susfs_in_kernel.patch",
+              "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/susfs/50_add_susfs_in_kernel-1.5.7.patch",
+          ]
+
+          def probe(url):
+              try:
+                  req = urllib.request.Request(url, headers={"User-Agent":"fix/2"})
+                  with urllib.request.urlopen(req, timeout=15) as r:
+                      d = r.read(4096).decode("utf-8","replace")
+                  return "diff --git" in d or "\n---" in d
+              except: return False
+
+          if GUARD2 in src:
+              warn("SUSFS URL already fixed — skipping")
+          else:
+              good = None
+              for u in CANDIDATES:
+                  info(f"Trying SUSFS URL: {u}")
+                  if probe(u): good = u; info("  ✓ Valid"); break
+                  else: warn("  ✗ Not valid")
+              if good:
+                  pat = re.compile(r'https?://\S+(?:susfs|SUSFS|galaxybuild)\S+\.patch')
+                  m = pat.search(src)
+                  if m:
+                      old = m.group(0).rstrip("'\")")
+                      src = src.replace(old, good + f"  {GUARD2}", 1)
+                      info(f"Patch 2: SUSFS URL replaced\n  OLD: {old}\n  NEW: {good}")
+                  else:
+                      warn("Could not find existing SUSFS URL in build.py")
+              else:
+                  warn("No working SUSFS URL found — leaving as-is")
+
+          # ── 3. Inject SUSFS patch validation ─────────────────────────────
+          GUARD3 = "# SUSFS_VALID"
+          ANCHOR3 = '("✅  SUSFS patch applied.")'
+          CODE3 = '''
+          # SUSFS_VALID
+          _sp = workspace / "susfs.patch"
+          if not _sp.exists() or _sp.stat().st_size < 100:
+              log.error(f"SUSFS patch missing/invalid ({_sp.stat().st_size if _sp.exists() else 0} bytes)")
+              raise SystemExit(1)
+          _h = _sp.read_text(errors="replace")[:512]
+          if "diff --git" not in _h and "\\n---" not in _h:
+              log.error(f"SUSFS patch is not a valid diff: {_h[:200]!r}")
+              raise SystemExit(1)
+          log.info("SUSFS patch validated OK")
+          '''
+          if GUARD3 in src:
+              warn("SUSFS validation already present — skipping")
+          elif ANCHOR3 in src:
+              lines = src.splitlines(keepends=True)
+              idx = next(i for i,l in enumerate(lines) if ANCHOR3 in l)
+              lines.insert(idx, CODE3)
+              src = "".join(lines)
+              info("Patch 3: SUSFS validation injected into build.py")
+          else:
+              warn("Could not find SUSFS success marker — validation skipped")
+
+          build_py.write_text(src)
+          info("build.py saved. All patches applied.")
+          PYEOF
 
       # ── 6. Run build script ───────────────────────────────────────────────
       - name: Build kernel (${{ matrix.device }})
